@@ -1,13 +1,13 @@
 #!/bin/sh
 set -eu
 
-repository='https://github.com/bllyanos/termdown.git'
-branch='main'
+repository='bllyanos/termdown'
+release_asset='termdown-linux-x86_64.tar.gz'
 install_root=${TERMDOWN_INSTALL_ROOT:-"${HOME:-}/.local"}
 
 usage() {
     cat <<'EOF'
-Install termdown from the GitHub repository.
+Install the latest termdown GitHub release.
 
 Environment:
   TERMDOWN_INSTALL_ROOT  Installation prefix (default: ~/.local)
@@ -29,19 +29,43 @@ if [ -z "${HOME:-}" ]; then
     exit 1
 fi
 
-if ! command -v cargo >/dev/null 2>&1; then
-    printf '%s\n' 'error: Cargo is required; install Rust from https://rustup.rs/' >&2
-    exit 1
-fi
+case "$(uname -s):$(uname -m)" in
+    Linux:x86_64|Linux:amd64) ;;
+    *)
+        printf '%s\n' 'error: prebuilt releases currently support Linux x86_64 only' >&2
+        exit 1
+        ;;
+esac
 
-printf 'Installing termdown from %s (%s) into %s/bin...\n' "$repository" "$branch" "$install_root"
+for command in curl tar install mktemp sha256sum; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf 'error: required command not found: %s\n' "$command" >&2
+        exit 1
+    fi
+done
+
+download_url="https://github.com/$repository/releases/latest/download/$release_asset"
+temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/termdown.XXXXXX")
+trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
+
+printf 'Downloading the latest termdown release...\n'
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    "$download_url" \
+    --output "$temporary_directory/$release_asset"
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    "$download_url.sha256" \
+    --output "$temporary_directory/$release_asset.sha256"
+
+(
+    cd "$temporary_directory"
+    sha256sum -c "$release_asset.sha256"
+)
+
+tar -xzf "$temporary_directory/$release_asset" -C "$temporary_directory"
 mkdir -p "$install_root/bin"
-cargo install \
-    --git "$repository" \
-    --branch "$branch" \
-    --root "$install_root" \
-    --locked \
-    --force
+install -m 0755 \
+    "$temporary_directory/termdown/termdown" \
+    "$install_root/bin/termdown"
 
 printf '\ntermdown installed at %s/bin/termdown\n' "$install_root"
 case ":${PATH:-}:" in
