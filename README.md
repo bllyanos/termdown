@@ -33,11 +33,14 @@ Most Markdown workflows force a choice between a full browser and a raw source f
 - Autolinks
 - Thematic breaks
 
+- Fenced code blocks use a borderless `code_background` area with one-cell horizontal padding
+- Long fenced code rows do not wrap; `←` / `→` or `h` / `l` scroll them horizontally while normal text remains wrapped
+
 Raw HTML, front matter, math, and other parser constructs are rendered as readable literal text where applicable. Raw HTML is not executed or interpreted as terminal control content.
 
 ### Terminal-native reading
 
-- Visual-line-aware wrapping and scrolling
+- Visual-line-aware wrapping and scrolling for normal document text
 - Dedicated scrollbar
 - Search that follows rendered content, including wrapped lines
 - Case-insensitive search with match counts
@@ -142,6 +145,8 @@ For normal reading invocations, the positional `FILE` argument is required. Use 
 
 | Key | Action |
 | --- | --- |
+| `h` / `←` | Scroll fenced code left one cell |
+| `l` / `→` | Scroll fenced code right one cell |
 | `j` / `↓` | Scroll down one visual row |
 | `k` / `↑` | Scroll up one visual row |
 | `f` / `PageDown` / `Space` | Scroll down one viewport |
@@ -190,8 +195,8 @@ The application is intentionally small and layered:
 1. **Input** — the CLI accepts a file path or `-` for standard input and loads an optional TOML theme.
 2. **Parsing** — Comrak parses the source with GFM extensions enabled.
 3. **Rendering** — the Markdown AST is converted into styled Ratatui text, with Unicode display width accounted for during layout.
-4. **Interaction** — a stateful event loop handles scrolling, viewport changes, search, and exit behavior.
-5. **Presentation** — Ratatui draws a header, wrapped document body, scrollbar, and context-sensitive footer.
+4. **Interaction** — a stateful event loop handles vertical reading, fenced-code horizontal scrolling, viewport changes, search, and exit behavior.
+5. **Presentation** — Ratatui draws a header, a wrapped document body, borderless tinted code areas with one-cell side padding, a scrollbar, and a context-sensitive footer.
 
 The parser and terminal renderer are separate from the interaction state, which keeps formatting behavior testable and makes viewport correctness explicit.
 

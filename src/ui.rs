@@ -1,17 +1,26 @@
-use crate::app::{App, SearchState};
+use crate::{
+    app::{App, SearchState},
+    markdown::RenderedDocument,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    text::{Line, Span, Text},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
+
+#[derive(Debug)]
+struct DocumentLayout {
+    visual_offsets: Vec<usize>,
+    content_rows: usize,
+    max_code_width: usize,
+}
 
 /// Draw the complete reader frame.
 ///
-/// The body is measured before it is rendered.  That measurement is important:
-/// the document's logical lines are not necessarily visual lines once wrapping is
-/// enabled, so search jumps and the scrollbar both use the same wrapped count as
-/// the paragraph that is eventually drawn.
+/// The body is measured before it is rendered. Prose uses the same wrapped
+/// line count as its paragraph, while fenced code rows remain one visual row
+/// and are horizontally clipped inside their tinted block.
 pub fn render(frame: &mut Frame, app: &mut App) {
     let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
@@ -25,10 +34,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let body_area = vertical_areas[1];
     let footer_area = vertical_areas[2];
 
-    let theme = &app.theme;
-
     // Keep the scrollbar in a dedicated one-cell strip so the document never
-    // wraps beneath it.  At a one-cell-wide terminal the content area is zero
+    // wraps beneath it. At a one-cell-wide terminal the content area is zero
     // width; that case is handled below instead of passing width zero to the
     // line-counting API.
     let horizontal_areas = Layout::default()
@@ -40,48 +47,132 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let has_content_area = content_area.width > 0 && content_area.height > 0;
     if has_content_area {
-        let paragraph = Paragraph::new(app.document.text.clone())
-            .style(theme.body_style())
-            .wrap(Wrap { trim: false });
-        let content_rows = paragraph.line_count(content_area.width);
+        let layout = measure_document(&app.document, content_area.width);
         let viewport_rows = usize::from(content_area.height);
+        let inner_width = usize::from(content_area.width.saturating_sub(2));
+        let horizontal_max = layout.max_code_width.saturating_sub(inner_width);
 
-        app.state.content_rows = content_rows;
-        app.state.viewport_rows = viewport_rows;
+        app.update_layout(layout.content_rows, viewport_rows, horizontal_max);
 
         if let Some(logical_line) = app.state.pending_jump.take() {
-            let visual_offset =
-                logical_line_to_visual_offset(&app.document.text, logical_line, content_area.width);
-            app.state.scroll = visual_offset;
+            app.state.scroll = logical_line_to_visual_offset(&app.document, logical_line, &layout);
+            app.clamp_scroll();
         }
 
-        let max_scroll = content_rows.saturating_sub(viewport_rows);
-        app.state.scroll = app.state.scroll.min(max_scroll);
+        render_document(frame, content_area, app, &layout);
 
-        let scroll = app.state.scroll.min(usize::from(u16::MAX)) as u16;
-        frame.render_widget(paragraph.scroll((scroll, 0)), content_area);
-
-        if scrollbar_area.width > 0 && scrollbar_area.height > 0 && content_rows > 0 {
-            let mut scrollbar_state = ScrollbarState::new(content_rows)
+        if scrollbar_area.width > 0 && scrollbar_area.height > 0 && layout.content_rows > 0 {
+            let mut scrollbar_state = ScrollbarState::new(layout.content_rows)
                 .position(app.state.scroll)
                 .viewport_content_length(viewport_rows);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .thumb_style(theme.scrollbar_style())
-                .track_style(theme.scrollbar_style());
+                .thumb_style(app.theme.scrollbar_style())
+                .track_style(app.theme.scrollbar_style());
             frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
         }
     } else {
         // Preserve a pending search target across a temporarily unusable
-        // terminal.  It will be converted to a visual offset on the first
-        // usable resize.  Existing scroll arithmetic is reset only because no
-        // viewport exists in which it could be meaningful.
-        app.state.content_rows = 0;
-        app.state.viewport_rows = 0;
-        app.state.scroll = 0;
+        // terminal. It will be converted to a visual offset on the first
+        // usable resize.
+        app.update_layout(0, 0, 0);
     }
 
     render_header(frame, header_area, app);
     render_footer(frame, footer_area, app);
+}
+
+fn measure_document(document: &RenderedDocument, width: u16) -> DocumentLayout {
+    let mut visual_offsets = Vec::with_capacity(document.text.lines.len());
+    let mut content_rows: usize = 0;
+    let mut max_code_width = 0;
+
+    for (logical_line, line) in document.text.lines.iter().enumerate() {
+        visual_offsets.push(content_rows);
+        if is_code_line(document, logical_line) {
+            content_rows = content_rows.saturating_add(1);
+            max_code_width = max_code_width.max(line.width());
+        } else {
+            content_rows = content_rows.saturating_add(
+                Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(width),
+            );
+        }
+    }
+
+    DocumentLayout {
+        visual_offsets,
+        content_rows,
+        max_code_width,
+    }
+}
+
+fn is_code_line(document: &RenderedDocument, logical_line: usize) -> bool {
+    document
+        .code_blocks
+        .iter()
+        .any(|range| range.contains(&logical_line))
+}
+
+fn render_document(frame: &mut Frame, area: Rect, app: &App, layout: &DocumentLayout) {
+    frame.render_widget(Block::default().style(app.theme.body_style()), area);
+
+    let visible_start = app.state.scroll;
+    let visible_end = visible_start.saturating_add(app.state.viewport_rows);
+    let inner_width = usize::from(area.width.saturating_sub(2));
+
+    for (logical_line, line) in app.document.text.lines.iter().enumerate() {
+        let visual_start = layout.visual_offsets[logical_line];
+        let visual_end = layout
+            .visual_offsets
+            .get(logical_line + 1)
+            .copied()
+            .unwrap_or(layout.content_rows);
+        if visual_end <= visible_start || visual_start >= visible_end {
+            continue;
+        }
+
+        let clipped_start = visual_start.max(visible_start);
+        let clipped_end = visual_end.min(visible_end);
+        let row = usize::from(area.y).saturating_add(clipped_start - visible_start);
+        let rect = Rect {
+            x: area.x,
+            y: row.min(u16::MAX as usize) as u16,
+            width: area.width,
+            height: (clipped_end - clipped_start).min(u16::MAX as usize) as u16,
+        };
+        let local_vertical_scroll = clipped_start.saturating_sub(visual_start);
+
+        if is_code_line(&app.document, logical_line) {
+            let local_horizontal_max = line.width().saturating_sub(inner_width);
+            let horizontal_scroll = app
+                .state
+                .horizontal_scroll
+                .min(local_horizontal_max)
+                .min(usize::from(u16::MAX)) as u16;
+            let block = Block::default()
+                .style(app.theme.code_block())
+                .padding(Padding::horizontal(1));
+            let paragraph = Paragraph::new(line.clone())
+                .style(app.theme.code_block())
+                .block(block);
+            frame.render_widget(
+                paragraph.scroll((
+                    local_vertical_scroll.min(usize::from(u16::MAX)) as u16,
+                    horizontal_scroll,
+                )),
+                rect,
+            );
+        } else {
+            let paragraph = Paragraph::new(line.clone())
+                .style(app.theme.body_style())
+                .wrap(Wrap { trim: false });
+            frame.render_widget(
+                paragraph.scroll((local_vertical_scroll.min(usize::from(u16::MAX)) as u16, 0)),
+                rect,
+            );
+        }
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -111,7 +202,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         (
-            Line::from("↑/↓ j/k  PgUp/PgDn b/f  g/G  / search  q quit"),
+            Line::from("←/→ h/l  ↑/↓ j/k  PgUp/PgDn b/f  g/G  / search  q quit"),
             app.theme.footer_style(),
         )
     };
@@ -134,43 +225,48 @@ fn match_summary(search: &SearchState) -> String {
 }
 
 /// Convert a logical rendered-text line into the visual row at which it starts.
-///
-/// Counting a wrapped prefix rather than multiplying a logical index by a
-/// constant keeps jumps correct for prose, tables, code, and any other line
-/// whose display width exceeds the current content viewport.
-fn logical_line_to_visual_offset(text: &Text<'static>, logical_line: usize, width: u16) -> usize {
-    if width == 0 || logical_line == 0 {
-        return 0;
+fn logical_line_to_visual_offset(
+    document: &RenderedDocument,
+    logical_line: usize,
+    layout: &DocumentLayout,
+) -> usize {
+    if document.text.lines.is_empty() {
+        0
+    } else {
+        layout
+            .visual_offsets
+            .get(logical_line)
+            .copied()
+            .unwrap_or(layout.content_rows)
     }
-
-    let prefix = Text::from(
-        text.lines
-            .iter()
-            .take(logical_line)
-            .cloned()
-            .collect::<Vec<_>>(),
-    );
-    Paragraph::new(prefix)
-        .wrap(Wrap { trim: false })
-        .line_count(width)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{logical_line_to_visual_offset, render};
+    use super::{logical_line_to_visual_offset, measure_document, render};
     use crate::{app::App, markdown::RenderedDocument, theme::Theme};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{
         Terminal,
         backend::TestBackend,
         text::{Line, Text},
     };
 
+    fn document(
+        lines: Vec<Line<'static>>,
+        code_blocks: Vec<std::ops::Range<usize>>,
+    ) -> RenderedDocument {
+        RenderedDocument {
+            text: Text::from(lines),
+            code_blocks,
+        }
+    }
+
     #[test]
     fn test_backend_draws_header_body_footer_and_scrollbar() {
         let mut lines = vec![Line::from("# Fixture")];
         lines.extend((0..63).map(|index| Line::from(format!("line {index}: a long enough body"))));
-        let text = Text::from(lines);
-        let document = RenderedDocument { text };
+        let document = document(lines, Vec::new());
         let mut app = App::new(document, "fixture.md".to_owned(), Theme::default());
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("test backend");
@@ -196,13 +292,67 @@ mod tests {
     }
 
     #[test]
+    fn code_rows_are_tinted_padded_and_horizontally_scrollable() {
+        let source = "0123456789ABCDEFGHIJabcdefghij";
+        let document = document(
+            vec![Line::from("prose"), Line::from(source), Line::from("after")],
+            vec![1..2],
+        );
+        let theme = Theme::default();
+        let mut app = App::new(document, "fixture.md".to_owned(), theme.clone());
+        let mut terminal = Terminal::new(TestBackend::new(24, 8)).expect("test backend");
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("initial draw succeeds");
+        let initial_rows = app.state.content_rows;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 2)].symbol(), " ");
+        assert_eq!(buffer[(1, 2)].symbol(), "0");
+        assert_eq!(buffer[(0, 2)].bg, theme.code_background);
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol().to_owned())
+            .collect::<String>();
+        assert!(!rendered.contains('╭'));
+        assert!(!rendered.contains('╰'));
+        assert!(!rendered.contains('│'));
+
+        for _ in 0..5 {
+            assert!(app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE,)));
+        }
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("scrolled draw succeeds");
+        assert_eq!(app.state.content_rows, initial_rows);
+        assert_eq!(terminal.backend().buffer()[(1, 2)].symbol(), "5");
+
+        for _ in 0..5 {
+            assert!(app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE,)));
+        }
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("returned draw succeeds");
+        assert_eq!(terminal.backend().buffer()[(1, 2)].symbol(), "0");
+        assert!((1u16..7u16).any(|row| {
+            let cell = &terminal.backend().buffer()[(23, row)];
+            !cell.symbol().trim().is_empty()
+        }));
+    }
+
+    #[test]
     fn wrapped_logical_jump_counts_visual_prefix_rows() {
-        let text = Text::from(vec![
-            Line::from("short"),
-            Line::from("this line is deliberately wider than the viewport"),
-            Line::from("target"),
-        ]);
-        assert_eq!(logical_line_to_visual_offset(&text, 0, 10), 0);
-        assert!(logical_line_to_visual_offset(&text, 2, 10) > 2);
+        let document = document(
+            vec![
+                Line::from("short"),
+                Line::from("this line is deliberately wider than the viewport"),
+                Line::from("target"),
+            ],
+            Vec::new(),
+        );
+        let layout = measure_document(&document, 10);
+        assert_eq!(logical_line_to_visual_offset(&document, 0, &layout), 0);
+        assert!(logical_line_to_visual_offset(&document, 2, &layout) > 2);
     }
 }

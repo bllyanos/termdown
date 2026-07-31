@@ -6,10 +6,12 @@ use comrak::nodes::{
 use comrak::{Arena, Options, parse_document};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
+use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
 
 pub struct RenderedDocument {
     pub text: Text<'static>,
+    pub code_blocks: Vec<Range<usize>>,
 }
 
 pub fn render(source: &str, theme: &Theme) -> Result<RenderedDocument> {
@@ -17,12 +19,13 @@ pub fn render(source: &str, theme: &Theme) -> Result<RenderedDocument> {
     let arena = Arena::new();
     let root = parse_document(&arena, source, &options);
     let renderer = Renderer { theme };
-    let mut lines = renderer.render_block_children(root, 0);
-    if lines.is_empty() {
-        lines.push(Line::default());
+    let mut rendered = renderer.render_block_children(root, 0);
+    if rendered.lines.is_empty() {
+        rendered.lines.push(Line::default());
     }
     Ok(RenderedDocument {
-        text: Text::from(lines),
+        text: Text::from(rendered.lines),
+        code_blocks: rendered.code_blocks,
     })
 }
 
@@ -41,70 +44,91 @@ struct Renderer<'a> {
     theme: &'a Theme,
 }
 
+#[derive(Default)]
+struct RenderedLines {
+    lines: Vec<Line<'static>>,
+    code_blocks: Vec<Range<usize>>,
+}
+
+impl RenderedLines {
+    fn from_lines(lines: Vec<Line<'static>>) -> Self {
+        Self {
+            lines,
+            code_blocks: Vec::new(),
+        }
+    }
+
+    fn append(&mut self, mut other: Self) {
+        let offset = self.lines.len();
+        for range in &mut other.code_blocks {
+            range.start += offset;
+            range.end += offset;
+        }
+        self.lines.extend(other.lines);
+        self.code_blocks.extend(other.code_blocks);
+    }
+}
+
 impl Renderer<'_> {
-    fn render_block_children<'n>(
-        &self,
-        node: &'n AstNode<'n>,
-        indent: usize,
-    ) -> Vec<Line<'static>> {
-        let mut out = Vec::new();
+    fn render_block_children<'n>(&self, node: &'n AstNode<'n>, indent: usize) -> RenderedLines {
+        let mut out = RenderedLines::default();
         let mut blocks = 0;
         for child in node.children() {
             let lines = self.render_block(child, indent);
-            if lines.is_empty() {
+            if lines.lines.is_empty() {
                 continue;
             }
             if blocks > 0 {
-                push_blank_line(&mut out);
+                push_blank_line(&mut out.lines);
             }
-            out.extend(lines);
+            out.append(lines);
             blocks += 1;
         }
         out
     }
 
-    fn render_block<'n>(&self, node: &'n AstNode<'n>, indent: usize) -> Vec<Line<'static>> {
+    fn render_block<'n>(&self, node: &'n AstNode<'n>, indent: usize) -> RenderedLines {
         let value = node.data.borrow().value.clone();
         match value {
             NodeValue::Document => self.render_block_children(node, indent),
             NodeValue::Paragraph => {
-                let mut out = Vec::new();
-                self.render_inline_children(node, &mut out, self.theme.body_style());
-                prefix_lines(&mut out, indent, "", self.theme.body_style());
-                out
+                let mut lines = Vec::new();
+                self.render_inline_children(node, &mut lines, self.theme.body_style());
+                prefix_lines(&mut lines, indent, "", self.theme.body_style());
+                RenderedLines::from_lines(lines)
             }
             NodeValue::Heading(heading) => {
                 let style = self.theme.heading(heading.level);
-                let mut out = Vec::new();
-                self.render_inline_children(node, &mut out, style);
-                if out.is_empty() {
-                    out.push(Line::default());
+                let mut lines = Vec::new();
+                self.render_inline_children(node, &mut lines, style);
+                if lines.is_empty() {
+                    lines.push(Line::default());
                 }
                 prepend(
-                    &mut out[0],
+                    &mut lines[0],
                     format!("{} ", "#".repeat(heading.level as usize)),
                     style,
                 );
-                prefix_lines(&mut out, indent, "", style);
-                out
+                prefix_lines(&mut lines, indent, "", style);
+                RenderedLines::from_lines(lines)
             }
             NodeValue::BlockQuote | NodeValue::MultilineBlockQuote(_) => {
                 let mut out = self.render_block_children(node, 0);
-                if out.is_empty() {
-                    out.push(Line::default());
+                if out.lines.is_empty() {
+                    out.lines.push(Line::default());
                 }
-                prefix_lines(&mut out, indent, "│ ", self.theme.blockquote());
+                prefix_lines(&mut out.lines, indent, "│ ", self.theme.blockquote());
                 out
             }
             NodeValue::List(list) => self.render_list(node, &list, indent),
             NodeValue::Item(_) | NodeValue::TaskItem(_) => self.render_block_children(node, indent),
             NodeValue::ThematicBreak => {
-                let mut out = vec![Line::from(Span::styled(
+                let mut lines = vec![Line::from(Span::styled(
                     "────".to_owned(),
                     self.theme.table_border(),
                 ))];
-                prefix_lines(&mut out, indent, "", self.theme.table_border());
-                out
+                prefix_lines(&mut lines, indent, "", self.theme.table_border());
+                RenderedLines::from_lines(lines)
             }
             NodeValue::CodeBlock(code) => self.render_code_block(&code, indent),
             NodeValue::Table(table) => self.render_table(node, &table, indent),
@@ -123,8 +147,8 @@ impl Renderer<'_> {
         node: &'n AstNode<'n>,
         list: &NodeList,
         indent: usize,
-    ) -> Vec<Line<'static>> {
-        let mut out = Vec::new();
+    ) -> RenderedLines {
+        let mut out = RenderedLines::default();
         for (index, item) in node.children().enumerate() {
             let task = match item.data.borrow().value.clone() {
                 NodeValue::TaskItem(t) => t.symbol,
@@ -152,16 +176,16 @@ impl Renderer<'_> {
             let marker = format!("{marker}{task_marker}");
             let width = display_width(&marker);
             let mut lines = self.render_item_content(item, indent, width);
-            if lines.is_empty() {
-                lines.push(Line::default());
+            if lines.lines.is_empty() {
+                lines.lines.push(Line::default());
             }
-            if !out.is_empty() {
-                push_blank_line(&mut out);
+            if !out.lines.is_empty() {
+                push_blank_line(&mut out.lines);
             }
-            prepend(&mut lines[0], marker, self.theme.body_style());
-            prefix_after_first(&mut lines, width, self.theme.body_style());
-            prefix_lines(&mut lines, indent, "", self.theme.body_style());
-            out.extend(lines);
+            prepend(&mut lines.lines[0], marker, self.theme.body_style());
+            prefix_after_first(&mut lines.lines, width, self.theme.body_style());
+            prefix_lines(&mut lines.lines, indent, "", self.theme.body_style());
+            out.append(lines);
         }
         out
     }
@@ -171,83 +195,71 @@ impl Renderer<'_> {
         item: &'n AstNode<'n>,
         indent: usize,
         marker_width: usize,
-    ) -> Vec<Line<'static>> {
-        let mut out = Vec::new();
+    ) -> RenderedLines {
+        let mut out = RenderedLines::default();
         let mut first = true;
         for child in item.children() {
             let value = child.data.borrow().value.clone();
             let is_list = matches!(&value, NodeValue::List(_));
             let mut lines = match value {
                 NodeValue::Paragraph => {
-                    let mut v = Vec::new();
-                    self.render_inline_children(child, &mut v, self.theme.body_style());
-                    v
+                    let mut lines = Vec::new();
+                    self.render_inline_children(child, &mut lines, self.theme.body_style());
+                    RenderedLines::from_lines(lines)
                 }
                 NodeValue::List(ref list) => self.render_list(child, list, 4),
                 _ => self.render_block(child, 0),
             };
-            if lines.is_empty() {
+            if lines.lines.is_empty() {
                 continue;
             }
-            if !out.is_empty() {
-                push_blank_line(&mut out);
+            if !out.lines.is_empty() {
+                push_blank_line(&mut out.lines);
             }
             if is_list {
-                out.extend(lines);
+                out.append(lines);
                 first = false;
                 continue;
             }
-            for line in &mut lines {
+            for line in &mut lines.lines {
                 if first {
                     first = false;
                 } else {
                     prepend(line, " ".repeat(marker_width), self.theme.body_style());
                 }
             }
-            out.extend(lines);
+            out.append(lines);
         }
         out
     }
 
-    fn render_code_block(&self, code: &NodeCodeBlock, indent: usize) -> Vec<Line<'static>> {
+    fn render_code_block(&self, code: &NodeCodeBlock, indent: usize) -> RenderedLines {
         let style = self.theme.code_block();
-        let info = sanitize_literal(&code.info);
-        let mut out = vec![Line::from(Span::styled(
-            if info.is_empty() {
-                "╭─".to_owned()
-            } else {
-                format!("╭─ {info}")
-            },
-            style,
-        ))];
+        let mut lines = Vec::new();
         let raw: Vec<&str> = code.literal.split('\n').collect();
         let last = raw.len().saturating_sub(1);
         for (i, line) in raw.into_iter().enumerate() {
             if i == last && line.is_empty() && code.literal.ends_with('\n') {
                 continue;
             }
-            out.push(Line::from(Span::styled(
-                format!("│ {}", sanitize_literal(line)),
-                style,
-            )));
+            lines.push(Line::from(Span::styled(sanitize_literal(line), style)));
         }
-        out.push(Line::from(Span::styled("╰─".to_owned(), style)));
-        prefix_lines(&mut out, indent, "", style);
-        out
+        let start = 0;
+        let end = lines.len();
+        prefix_lines(&mut lines, indent, "", style);
+        RenderedLines {
+            lines,
+            code_blocks: vec![start..end],
+        }
     }
 
-    fn render_literal_block(
-        &self,
-        literal: &str,
-        indent: usize,
-        style: Style,
-    ) -> Vec<Line<'static>> {
-        let mut out = literal
+    fn render_literal_block(&self, literal: &str, indent: usize, style: Style) -> RenderedLines {
+        let mut lines = literal
             .split('\n')
             .map(|part| Line::from(Span::styled(sanitize_literal(part), style)))
             .collect::<Vec<_>>();
-        prefix_lines(&mut out, indent, "", style);
-        out
+        prefix_lines(&mut lines, indent, "", style);
+        RenderedLines::from_lines(lines)
     }
 
     fn render_table<'n>(
@@ -255,7 +267,7 @@ impl Renderer<'_> {
         node: &'n AstNode<'n>,
         table: &NodeTable,
         indent: usize,
-    ) -> Vec<Line<'static>> {
+    ) -> RenderedLines {
         let mut rows = Vec::new();
         for row in node.children() {
             let header = matches!(row.data.borrow().value.clone(), NodeValue::TableRow(true));
@@ -286,7 +298,7 @@ impl Renderer<'_> {
             .max(table.alignments.len())
             .max(row_columns);
         if cols == 0 {
-            return Vec::new();
+            return RenderedLines::default();
         }
         for (_, cells) in &mut rows {
             while cells.len() < cols {
@@ -304,7 +316,7 @@ impl Renderer<'_> {
                 );
             }
         }
-        let mut out = vec![self.border_line(&widths, '┌', '┬', '┐')];
+        let mut lines = vec![self.border_line(&widths, '┌', '┬', '┐')];
         for (ri, (header, cells)) in rows.iter().enumerate() {
             let cell_style = if *header {
                 self.theme.table_header()
@@ -347,14 +359,14 @@ impl Renderer<'_> {
                 line.spans
                     .push(Span::styled("│".to_owned(), self.theme.table_border()));
             }
-            out.push(line);
+            lines.push(line);
             if ri + 1 < rows.len() {
-                out.push(self.border_line(&widths, '├', '┼', '┤'));
+                lines.push(self.border_line(&widths, '├', '┼', '┤'));
             }
         }
-        out.push(self.border_line(&widths, '└', '┴', '┘'));
-        prefix_lines(&mut out, indent, "", self.theme.table_cell());
-        out
+        lines.push(self.border_line(&widths, '└', '┴', '┘'));
+        prefix_lines(&mut lines, indent, "", self.theme.table_cell());
+        RenderedLines::from_lines(lines)
     }
 
     fn border_line(
@@ -376,14 +388,10 @@ impl Renderer<'_> {
         Line::from(Span::styled(s, self.theme.table_border()))
     }
 
-    fn render_fallback_block<'n>(
-        &self,
-        node: &'n AstNode<'n>,
-        indent: usize,
-    ) -> Vec<Line<'static>> {
+    fn render_fallback_block<'n>(&self, node: &'n AstNode<'n>, indent: usize) -> RenderedLines {
         if node.children().next().is_some() {
             let mut lines = self.render_block_children(node, indent);
-            mute_lines(&mut lines, self.theme.muted());
+            mute_lines(&mut lines.lines, self.theme.muted());
             return lines;
         }
         let value = node.data.borrow().value.clone();
@@ -658,8 +666,9 @@ mod tests {
     #[test]
     fn gfm_constructs_and_safety_are_visible() {
         let source = "# GFM\n\n| left | center | right |\n| :--- | :----: | ---: |\n| a | b | c |\n\n- [x] done\n- [ ] todo\n\n~~gone~~ www.example.com <https://example.com>\n\n[link](https://example.com) ![diagram](diagram.png)\n\n<script>\u{1b}[31malert(1)</script>\n\n```rust\n\tlet x = 1;\u{7f}\n```\n";
-        let text = render(source, &Theme::default()).unwrap().text;
-        let rendered = text
+        let document = render(source, &Theme::default()).unwrap();
+        let rendered = document
+            .text
             .lines
             .iter()
             .map(Line::to_string)
@@ -677,11 +686,67 @@ mod tests {
                 && rendered.contains("www.example.com")
                 && rendered.contains("https://example.com")
                 && rendered.contains("[img] diagram")
-                && rendered.contains("╭─ rust")
-                && rendered.contains('�')
+                && rendered.contains("    let x = 1;�")
+                && !rendered.contains("╭─")
+                && !rendered.contains("╰─")
+                && !rendered.contains("rust")
         );
         assert!(!rendered.contains('\u{1b}'));
+        assert_eq!(document.code_blocks.len(), 1);
+        let code_range = &document.code_blocks[0];
+        assert_eq!(
+            document.text.lines[code_range.start].to_string(),
+            "    let x = 1;�"
+        );
+        assert_eq!(code_range.end - code_range.start, 1);
     }
+
+    #[test]
+    fn code_ranges_track_rows_and_empty_documents_stay_nonempty() {
+        let document = render(
+            "before\n\n```rust\none\ntwo\n```\n\nafter",
+            &Theme::default(),
+        )
+        .unwrap();
+        let lines = document
+            .text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines, ["before", "", "one", "two", "", "after"]);
+        assert_eq!(document.code_blocks, vec![2..4]);
+
+        let empty = render("", &Theme::default()).unwrap();
+        assert_eq!(empty.text.lines.len(), 1);
+        assert!(empty.code_blocks.is_empty());
+    }
+
+    #[test]
+    fn trailing_newline_does_not_create_extra_code_row() {
+        let document = render("```\nfirst\nsecond\n```\n", &Theme::default()).unwrap();
+        let lines = document
+            .text
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines, ["first", "second"]);
+        assert_eq!(document.code_blocks, vec![0..2]);
+
+        let empty_literal = render("```\n```\n", &Theme::default()).unwrap();
+        assert_eq!(
+            empty_literal
+                .text
+                .lines
+                .iter()
+                .map(Line::to_string)
+                .collect::<Vec<_>>(),
+            [""]
+        );
+        assert_eq!(empty_literal.code_blocks, vec![0..1]);
+    }
+
     #[test]
     fn sanitize_literal_expands_tabs_and_replaces_controls() {
         assert_eq!(sanitize_literal("a\tb\r\0\u{1b}c"), "a    b���c");

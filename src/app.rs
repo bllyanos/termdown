@@ -24,6 +24,8 @@ pub struct ViewState {
     pub(crate) scroll: usize,
     pub(crate) content_rows: usize,
     pub(crate) viewport_rows: usize,
+    pub(crate) horizontal_scroll: usize,
+    pub(crate) horizontal_max: usize,
     pub(crate) pending_jump: Option<usize>,
     pub(crate) search: SearchState,
     pub(crate) should_quit: bool,
@@ -109,6 +111,18 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.scroll_up(1);
+                true
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.state.horizontal_scroll = self.state.horizontal_scroll.saturating_sub(1);
+                true
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.state.horizontal_scroll = self
+                    .state
+                    .horizontal_scroll
+                    .saturating_add(1)
+                    .min(self.state.horizontal_max);
                 true
             }
             KeyCode::Char('f') | KeyCode::PageDown | KeyCode::Char(' ') => {
@@ -271,15 +285,26 @@ impl App {
             .saturating_sub(self.state.viewport_rows)
     }
 
-    /// Update visual row counts after a layout/wrap calculation.
-    pub(crate) fn update_layout(&mut self, content_rows: usize, viewport_rows: usize) {
+    /// Update visual row counts and horizontal overflow after a layout calculation.
+    pub(crate) fn update_layout(
+        &mut self,
+        content_rows: usize,
+        viewport_rows: usize,
+        horizontal_max: usize,
+    ) {
         self.state.content_rows = content_rows;
         self.state.viewport_rows = viewport_rows;
+        self.state.horizontal_max = horizontal_max;
         self.clamp_scroll();
+        self.clamp_horizontal();
     }
 
     pub(crate) fn clamp_scroll(&mut self) {
         self.state.scroll = min(self.state.scroll, self.max_scroll());
+    }
+
+    pub(crate) fn clamp_horizontal(&mut self) {
+        self.state.horizontal_scroll = min(self.state.horizontal_scroll, self.state.horizontal_max);
     }
 
     /// Apply a visual offset calculated from a pending logical search line.
@@ -353,6 +378,7 @@ mod tests {
         App::new(
             RenderedDocument {
                 text: Text::from(source.to_owned()),
+                code_blocks: Vec::new(),
             },
             "test.md".to_owned(),
             Theme::default(),
@@ -366,7 +392,7 @@ mod tests {
     #[test]
     fn movement_uses_visual_rows_and_page_size() {
         let mut app = app_with_text("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight");
-        app.update_layout(8, 3);
+        app.update_layout(8, 3, 4);
 
         assert!(app.handle_key(press(KeyCode::Char('j'))));
         assert_eq!(app.state.scroll, 1);
@@ -381,25 +407,68 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_movement_saturates_and_preserves_vertical_position() {
+        let mut app = app_with_text("one\ntwo\nthree\nfour\nfive");
+        app.update_layout(5, 2, 2);
+
+        assert!(app.handle_key(press(KeyCode::Right)));
+        assert_eq!(app.state.horizontal_scroll, 1);
+        assert!(app.handle_key(press(KeyCode::Char('l'))));
+        assert_eq!(app.state.horizontal_scroll, 2);
+        assert!(app.handle_key(press(KeyCode::Right)));
+        assert_eq!(app.state.horizontal_scroll, 2);
+
+        assert!(app.handle_key(press(KeyCode::Char('j'))));
+        assert!(app.handle_key(press(KeyCode::Char('f'))));
+        assert!(app.handle_key(press(KeyCode::Char('b'))));
+        assert!(app.handle_key(press(KeyCode::Char('G'))));
+        assert!(app.handle_key(press(KeyCode::Char('g'))));
+        assert_eq!(app.state.horizontal_scroll, 2);
+
+        assert!(app.handle_key(press(KeyCode::Char('h'))));
+        assert_eq!(app.state.horizontal_scroll, 1);
+        assert!(app.handle_key(press(KeyCode::Left)));
+        assert_eq!(app.state.horizontal_scroll, 0);
+        assert!(app.handle_key(press(KeyCode::Left)));
+        assert_eq!(app.state.horizontal_scroll, 0);
+    }
+
+    #[test]
     fn movement_clamps_after_resize_and_empty_content() {
         let mut app = app_with_text("one\ntwo\nthree\nfour\nfive");
-        app.update_layout(5, 2);
+        app.update_layout(5, 2, 4);
         app.handle_key(press(KeyCode::End));
         assert_eq!(app.state.scroll, 3);
+        app.handle_key(press(KeyCode::Char('l')));
+        app.handle_key(press(KeyCode::Char('l')));
+        app.handle_key(press(KeyCode::Char('l')));
+        app.handle_key(press(KeyCode::Char('l')));
+        assert_eq!(app.state.horizontal_scroll, 4);
+        app.state.horizontal_scroll = 3;
+        let modified = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert!(!app.handle_key(modified));
+        assert_eq!(app.state.horizontal_scroll, 3);
 
-        app.update_layout(5, 8);
+        app.update_layout(5, 8, 2);
         assert_eq!(app.state.scroll, 0);
+        assert_eq!(app.state.horizontal_scroll, 2);
+
+        app.update_layout(5, 8, 9);
+        assert_eq!(app.state.horizontal_scroll, 2);
 
         let mut empty = app_with_text("");
-        empty.update_layout(0, 4);
+        empty.update_layout(0, 4, 0);
         empty.handle_key(press(KeyCode::End));
         assert_eq!(empty.state.scroll, 0);
+        assert_eq!(empty.state.horizontal_scroll, 0);
     }
 
     #[test]
     fn search_is_case_insensitive_and_cycles_matches() {
         let mut app = app_with_text("Alpha\nbeta\nALPHABET");
-        app.update_layout(3, 1);
+        app.update_layout(3, 1, 2);
+        assert!(app.handle_key(press(KeyCode::Char('l'))));
+        assert_eq!(app.state.horizontal_scroll, 1);
         assert!(app.handle_key(press(KeyCode::Char('/'))));
         assert!(app.state.search.active);
         for character in "alpha".chars() {
@@ -411,6 +480,7 @@ mod tests {
         assert_eq!(app.state.search.committed, "alpha");
         assert_eq!(app.state.search.current, Some(0));
         assert_eq!(app.state.pending_jump, Some(0));
+        assert_eq!(app.state.horizontal_scroll, 1);
 
         assert!(app.handle_key(press(KeyCode::Char('n'))));
         assert_eq!(app.state.search.current, Some(1));
@@ -418,6 +488,7 @@ mod tests {
         assert!(app.handle_key(press(KeyCode::Char('N'))));
         assert_eq!(app.state.search.current, Some(0));
         assert_eq!(app.state.pending_jump, Some(0));
+        assert_eq!(app.state.horizontal_scroll, 1);
     }
 
     #[test]
