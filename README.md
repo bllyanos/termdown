@@ -51,6 +51,32 @@ Supply a TOML file to override semantic colors without recompiling. Colors accep
 
 ## Installation
 
+### Quick install
+
+The installer builds the latest `main` revision from source and installs the binary into `~/.local/bin` without requiring `sudo`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/bllyanos/termdown/main/install.sh | sh
+```
+
+For a reviewable install, download the script first:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/bllyanos/termdown/main/install.sh \
+  -o install.sh
+less install.sh
+sh install.sh
+```
+
+Set `TERMDOWN_INSTALL_ROOT` to change the installation prefix:
+
+```bash
+TERMDOWN_INSTALL_ROOT="$HOME/.local" sh install.sh
+```
+
+The installer requires Rust and Cargo with Edition 2024 support. It uses the repository lockfile and installs through Cargo's user-local prefix. Add `~/.local/bin` to `PATH` if it is not already present.
+
 ### From source
 
 Requirements:
@@ -71,7 +97,7 @@ cargo build --release
 ./target/release/termdown README.md
 ```
 
-> The repository is currently the canonical installation source. A published crate or platform-specific release artifacts should only be documented once they are available.
+The quick installer currently builds from source because this repository does not publish platform-specific release artifacts.
 
 ## Usage
 
