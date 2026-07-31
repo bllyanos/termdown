@@ -2,28 +2,46 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
   release:
-    name: Build and publish Linux release
+    name: Create release PR and publish assets
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out source
+      - name: Create or update release PR
+        id: release
+        uses: googleapis/release-please-action@v5.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release-type: rust
+          target-branch: main
+          include-component-in-tag: false
+
+      - name: Check out released tag
+        if: ${{ steps.release.outputs.release_created == 'true' }}
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag_name }}
 
       - name: Install stable Rust
+        if: ${{ steps.release.outputs.release_created == 'true' }}
         run: rustup toolchain install stable --profile minimal
 
       - name: Build release binary
+        if: ${{ steps.release.outputs.release_created == 'true' }}
         run: cargo +stable build --locked --release
 
       - name: Package release assets
+        if: ${{ steps.release.outputs.release_created == 'true' }}
         run: |
           mkdir -p dist/termdown
           cp target/release/termdown dist/termdown/
@@ -31,13 +49,13 @@ jobs:
           tar -C dist -czf dist/termdown-linux-x86_64.tar.gz termdown
           (cd dist && sha256sum termdown-linux-x86_64.tar.gz) > dist/termdown-linux-x86_64.tar.gz.sha256
 
-      - name: Publish GitHub release
+      - name: Upload release assets
+        if: ${{ steps.release.outputs.release_created == 'true' }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          gh release upload "${{ steps.release.outputs.tag_name }}" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "termdown $GITHUB_REF_NAME" \
-            --generate-notes \
+            --clobber \
             dist/termdown-linux-x86_64.tar.gz \
             dist/termdown-linux-x86_64.tar.gz.sha256

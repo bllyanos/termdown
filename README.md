@@ -99,7 +99,7 @@ cargo build --release
 ./target/release/termdown README.md
 ```
 
-Releases are built and published automatically when a `vX.Y.Z` tag is pushed.
+Releases are automated from Conventional Commits pushed to `main`. Release Please opens a release PR; merging it bumps Cargo metadata, creates a `vX.Y.Z` tag and GitHub release, and publishes Linux x86_64 assets.
 
 ## Usage
 
