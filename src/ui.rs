@@ -85,18 +85,30 @@ fn measure_document(document: &RenderedDocument, width: u16) -> DocumentLayout {
     let mut visual_offsets = Vec::with_capacity(document.text.lines.len());
     let mut content_rows: usize = 0;
     let mut max_code_width = 0;
+    let mut logical_line = 0;
 
-    for (logical_line, line) in document.text.lines.iter().enumerate() {
-        visual_offsets.push(content_rows);
-        if is_code_line(document, logical_line) {
+    while logical_line < document.text.lines.len() {
+        if let Some(range) = document
+            .code_blocks
+            .iter()
+            .find(|range| range.start == logical_line)
+        {
             content_rows = content_rows.saturating_add(1);
-            max_code_width = max_code_width.max(line.width());
+            for code_line in range.clone() {
+                visual_offsets.push(content_rows);
+                content_rows = content_rows.saturating_add(1);
+                max_code_width = max_code_width.max(document.text.lines[code_line].width());
+            }
+            content_rows = content_rows.saturating_add(1);
+            logical_line = range.end;
         } else {
+            visual_offsets.push(content_rows);
             content_rows = content_rows.saturating_add(
-                Paragraph::new(line.clone())
+                Paragraph::new(document.text.lines[logical_line].clone())
                     .wrap(Wrap { trim: false })
                     .line_count(width),
             );
+            logical_line += 1;
         }
     }
 
@@ -119,9 +131,12 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, layout: &DocumentLa
 
     let visible_start = app.state.scroll;
     let visible_end = visible_start.saturating_add(app.state.viewport_rows);
-    let inner_width = usize::from(area.width.saturating_sub(2));
 
     for (logical_line, line) in app.document.text.lines.iter().enumerate() {
+        if is_code_line(&app.document, logical_line) {
+            continue;
+        }
+
         let visual_start = layout.visual_offsets[logical_line];
         let visual_end = layout
             .visual_offsets
@@ -134,45 +149,95 @@ fn render_document(frame: &mut Frame, area: Rect, app: &App, layout: &DocumentLa
 
         let clipped_start = visual_start.max(visible_start);
         let clipped_end = visual_end.min(visible_end);
-        let row = usize::from(area.y).saturating_add(clipped_start - visible_start);
         let rect = Rect {
             x: area.x,
-            y: row.min(u16::MAX as usize) as u16,
+            y: (usize::from(area.y) + clipped_start - visible_start).min(u16::MAX as usize) as u16,
             width: area.width,
             height: (clipped_end - clipped_start).min(u16::MAX as usize) as u16,
         };
-        let local_vertical_scroll = clipped_start.saturating_sub(visual_start);
-
-        if is_code_line(&app.document, logical_line) {
-            let local_horizontal_max = line.width().saturating_sub(inner_width);
-            let horizontal_scroll = app
-                .state
-                .horizontal_scroll
-                .min(local_horizontal_max)
-                .min(usize::from(u16::MAX)) as u16;
-            let block = Block::default()
-                .style(app.theme.code_block())
-                .padding(Padding::horizontal(1));
-            let paragraph = Paragraph::new(line.clone())
-                .style(app.theme.code_block())
-                .block(block);
-            frame.render_widget(
-                paragraph.scroll((
-                    local_vertical_scroll.min(usize::from(u16::MAX)) as u16,
-                    horizontal_scroll,
-                )),
-                rect,
-            );
-        } else {
-            let paragraph = Paragraph::new(line.clone())
-                .style(app.theme.body_style())
-                .wrap(Wrap { trim: false });
-            frame.render_widget(
-                paragraph.scroll((local_vertical_scroll.min(usize::from(u16::MAX)) as u16, 0)),
-                rect,
-            );
-        }
+        let paragraph = Paragraph::new(line.clone())
+            .style(app.theme.body_style())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(
+            paragraph.scroll((
+                clipped_start
+                    .saturating_sub(visual_start)
+                    .min(usize::from(u16::MAX)) as u16,
+                0,
+            )),
+            rect,
+        );
     }
+
+    for range in &app.document.code_blocks {
+        render_code_block(frame, area, app, layout, range, visible_start, visible_end);
+    }
+}
+
+fn render_code_block(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &DocumentLayout,
+    range: &std::ops::Range<usize>,
+    visible_start: usize,
+    visible_end: usize,
+) {
+    if range.is_empty() {
+        return;
+    }
+
+    let source_start = layout.visual_offsets[range.start];
+    let block_start = source_start.saturating_sub(1);
+    let block_end = layout.visual_offsets[range.end - 1].saturating_add(2);
+    if block_end <= visible_start || block_start >= visible_end {
+        return;
+    }
+
+    let clipped_start = block_start.max(visible_start);
+    let clipped_end = block_end.min(visible_end);
+    let rect = Rect {
+        x: area.x,
+        y: (usize::from(area.y) + clipped_start - visible_start).min(u16::MAX as usize) as u16,
+        width: area.width,
+        height: (clipped_end - clipped_start).min(u16::MAX as usize) as u16,
+    };
+    let top_padding = usize::from(block_start >= visible_start);
+    let bottom_padding = usize::from(block_end <= visible_end);
+    let source_skip = visible_start.saturating_sub(source_start);
+    let inner_width = usize::from(area.width.saturating_sub(2));
+    let raw_width = range
+        .clone()
+        .map(|line| app.document.text.lines[line].width())
+        .max()
+        .unwrap_or_default();
+    let horizontal_scroll = app
+        .state
+        .horizontal_scroll
+        .min(raw_width.saturating_sub(inner_width))
+        .min(usize::from(u16::MAX)) as u16;
+    let lines = range
+        .clone()
+        .map(|line| app.document.text.lines[line].clone())
+        .collect::<Vec<_>>();
+    let block = Block::default()
+        .style(app.theme.code_block())
+        .padding(Padding::new(
+            1,
+            1,
+            top_padding as u16,
+            bottom_padding as u16,
+        ));
+    let paragraph = Paragraph::new(lines)
+        .style(app.theme.code_block())
+        .block(block);
+    frame.render_widget(
+        paragraph.scroll((
+            source_skip.min(usize::from(u16::MAX)) as u16,
+            horizontal_scroll,
+        )),
+        rect,
+    );
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -308,8 +373,9 @@ mod tests {
         let initial_rows = app.state.content_rows;
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(0, 2)].symbol(), " ");
-        assert_eq!(buffer[(1, 2)].symbol(), "0");
+        assert_eq!(buffer[(1, 3)].symbol(), "0");
         assert_eq!(buffer[(0, 2)].bg, theme.code_background);
+        assert_eq!(buffer[(0, 4)].bg, theme.code_background);
         let rendered = buffer
             .content
             .iter()
@@ -326,7 +392,7 @@ mod tests {
             .draw(|frame| render(frame, &mut app))
             .expect("scrolled draw succeeds");
         assert_eq!(app.state.content_rows, initial_rows);
-        assert_eq!(terminal.backend().buffer()[(1, 2)].symbol(), "5");
+        assert_eq!(terminal.backend().buffer()[(1, 3)].symbol(), "5");
 
         for _ in 0..5 {
             assert!(app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE,)));
@@ -334,7 +400,7 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("returned draw succeeds");
-        assert_eq!(terminal.backend().buffer()[(1, 2)].symbol(), "0");
+        assert_eq!(terminal.backend().buffer()[(1, 3)].symbol(), "0");
         assert!((1u16..7u16).any(|row| {
             let cell = &terminal.backend().buffer()[(23, row)];
             !cell.symbol().trim().is_empty()

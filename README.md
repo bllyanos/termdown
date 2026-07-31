@@ -33,7 +33,7 @@ Most Markdown workflows force a choice between a full browser and a raw source f
 - Autolinks
 - Thematic breaks
 
-- Fenced code blocks use a borderless `code_background` area with one-cell horizontal padding
+- Fenced code blocks use a borderless `code_background` area with one-cell padding on all sides
 - Long fenced code rows do not wrap; `←` / `→` or `h` / `l` scroll them horizontally while normal text remains wrapped
 
 Raw HTML, front matter, math, and other parser constructs are rendered as readable literal text where applicable. Raw HTML is not executed or interpreted as terminal control content.
@@ -196,7 +196,7 @@ The application is intentionally small and layered:
 2. **Parsing** — Comrak parses the source with GFM extensions enabled.
 3. **Rendering** — the Markdown AST is converted into styled Ratatui text, with Unicode display width accounted for during layout.
 4. **Interaction** — a stateful event loop handles vertical reading, fenced-code horizontal scrolling, viewport changes, search, and exit behavior.
-5. **Presentation** — Ratatui draws a header, a wrapped document body, borderless tinted code areas with one-cell side padding, a scrollbar, and a context-sensitive footer.
+5. **Presentation** — Ratatui draws a header, a wrapped document body, borderless tinted code areas with one-cell padding on all sides, a scrollbar, and a context-sensitive footer.
 
 The parser and terminal renderer are separate from the interaction state, which keeps formatting behavior testable and makes viewport correctness explicit.
 
