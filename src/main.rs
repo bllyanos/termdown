@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 mod app;
 mod markdown;
@@ -11,9 +11,15 @@ mod ui;
 #[derive(Debug, Parser)]
 #[command(
     name = "termdown",
-    about = "A fast GFM Markdown reader for the terminal"
+    version,
+    about = "A fast GFM Markdown reader for the terminal",
+    disable_version_flag = true
 )]
 struct Cli {
+    /// Print version information
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    version: Option<bool>,
+
     /// Markdown file to read, or - for stdin
     #[arg(value_name = "FILE")]
     file: PathBuf,
@@ -64,6 +70,24 @@ mod tests {
         let cli = Cli::try_parse_from(["termdown", "-"]).unwrap();
         assert_eq!(cli.file, PathBuf::from("-"));
         assert!(cli.theme.is_none());
+    }
+
+    #[test]
+    fn cli_short_version_flag() {
+        let error = Cli::try_parse_from(["termdown", "-v"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        let output = error.to_string();
+        assert!(output.contains("termdown"));
+        assert!(output.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn cli_long_version_flag() {
+        let error = Cli::try_parse_from(["termdown", "--version"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        let output = error.to_string();
+        assert!(output.contains("termdown"));
+        assert!(output.contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

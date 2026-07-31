@@ -127,7 +127,16 @@ Load a custom theme:
 termdown --theme ~/.config/termdown/theme.toml docs/runbook.md
 ```
 
-The positional `FILE` argument is required. Use `-` to read Markdown from standard input.
+Show the installed version:
+
+```bash
+termdown --version
+termdown -v
+```
+
+These commands do not require `FILE` and print the version sourced from the package metadata.
+
+For normal reading invocations, the positional `FILE` argument is required. Use `-` to read Markdown from standard input.
 
 ## Keyboard controls
 
